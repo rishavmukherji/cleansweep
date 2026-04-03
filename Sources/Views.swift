@@ -23,12 +23,13 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 210)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 220)
         } detail: {
             Group {
                 switch selected {
                 case .overview: OverviewView(selected: $selected)
                 case .nodeModules: NodeModulesView()
+                case .buildArtifacts: BuildArtifactsView()
                 case .caches: CachesView()
                 case .appData: AppDataView()
                 case .applications: AppsView()
@@ -42,6 +43,7 @@ struct ContentView: View {
     func sizeFor(_ cat: ScanCategory) -> Int64? {
         switch cat {
         case .nodeModules: return scanner.totalNodeModulesSize
+        case .buildArtifacts: return scanner.totalBuildArtifactsSize
         case .caches: return scanner.totalCachesSize
         case .appData: return scanner.totalAppDataSize
         default: return nil
@@ -75,12 +77,17 @@ struct OverviewView: View {
                                 detail: "\(scanner.nodeModules.count) directories") {
                         selected = .nodeModules
                     }
+                    CategoryRow(icon: "hammer", name: "Build Artifacts",
+                                size: scanner.totalBuildArtifactsSize,
+                                detail: "\(scanner.buildArtifacts.count) directories") {
+                        selected = .buildArtifacts
+                    }
                     CategoryRow(icon: "archivebox", name: "Caches",
                                 size: scanner.totalCachesSize,
                                 detail: "\(scanner.caches.count) directories") {
                         selected = .caches
                     }
-                    CategoryRow(icon: "app.badge.checkmark", name: "App Data",
+                    CategoryRow(icon: "app.badge.checkmark", name: "App & Dev Data",
                                 size: scanner.totalAppDataSize,
                                 detail: "\(scanner.appData.count) sources") {
                         selected = .appData
@@ -209,7 +216,6 @@ struct NodeModulesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("node_modules").font(.title2.bold())
@@ -230,7 +236,6 @@ struct NodeModulesView: View {
 
             Divider()
 
-            // Column headers
             HStack {
                 Text("").frame(width: 24)
                 Text("Repository").fontWeight(.semibold)
@@ -243,7 +248,6 @@ struct NodeModulesView: View {
 
             Divider()
 
-            // List
             List {
                 ForEach(scanner.nodeModules) { item in
                     HStack {
@@ -267,7 +271,7 @@ struct NodeModulesView: View {
 
                         Text(item.lastCommitDate)
                             .frame(width: 110, alignment: .trailing)
-                            .foregroundStyle(isOld(item) ? .red : .secondary)
+                            .foregroundStyle(isOld(item.lastCommitDate) ? .red : .secondary)
                     }
                     .padding(.vertical, 2)
                 }
@@ -286,23 +290,109 @@ struct NodeModulesView: View {
     }
 
     private func selectInactive() {
-        let cutoff = Calendar.current.date(byAdding: .day, value: -60, to: Date())!
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
         for item in scanner.nodeModules {
-            if item.lastCommitDate == "Unknown" ||
-               (fmt.date(from: item.lastCommitDate).map { $0 < cutoff } ?? true) {
-                selected.insert(item.id)
-            }
+            if isOld(item.lastCommitDate) { selected.insert(item.id) }
         }
     }
 
-    private func isOld(_ item: NodeModuleItem) -> Bool {
+    private func isOld(_ dateStr: String) -> Bool {
+        guard dateStr != "Unknown" else { return true }
         let cutoff = Calendar.current.date(byAdding: .day, value: -60, to: Date())!
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        return item.lastCommitDate == "Unknown" ||
-               (fmt.date(from: item.lastCommitDate).map { $0 < cutoff } ?? true)
+        return fmt.date(from: dateStr).map { $0 < cutoff } ?? true
+    }
+}
+
+// MARK: - Build Artifacts
+
+struct BuildArtifactsView: View {
+    @EnvironmentObject var scanner: DiskScanner
+    @State private var selected = Set<UUID>()
+    @State private var showConfirm = false
+
+    var selectedSize: Int64 {
+        scanner.buildArtifacts.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.size }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Build Artifacts").font(.title2.bold())
+                    Text("\(scanner.buildArtifacts.count) directories \u{00B7} \(DiskScanner.fmt(scanner.totalBuildArtifactsSize)) total")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Select All") { selected = Set(scanner.buildArtifacts.map(\.id)) }
+                    .buttonStyle(.bordered)
+                Button("Delete Selected (\(DiskScanner.fmt(selectedSize)))") { showConfirm = true }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(selected.isEmpty)
+            }
+            .padding()
+
+            Divider()
+
+            HStack {
+                Text("").frame(width: 24)
+                Text("Project").fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Type").fontWeight(.semibold).frame(width: 70, alignment: .trailing)
+                Text("Size").fontWeight(.semibold).frame(width: 80, alignment: .trailing)
+                Text("Last Commit").fontWeight(.semibold).frame(width: 110, alignment: .trailing)
+            }
+            .padding(.horizontal).padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            List {
+                ForEach(scanner.buildArtifacts) { item in
+                    HStack {
+                        Toggle("", isOn: Binding(
+                            get: { selected.contains(item.id) },
+                            set: { val in
+                                if val { selected.insert(item.id) } else { selected.remove(item.id) }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .frame(width: 24)
+
+                        Text(item.repoName)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(1)
+
+                        Text(item.artifactType)
+                            .font(.caption)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(Color.gray.opacity(0.2)))
+                            .frame(width: 70, alignment: .trailing)
+
+                        Text(DiskScanner.fmt(item.size))
+                            .monospacedDigit()
+                            .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+
+                        Text(item.lastCommitDate)
+                            .frame(width: 110, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .listStyle(.plain)
+        }
+        .alert("Delete build artifacts?", isPresented: $showConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete \(selected.count) folders", role: .destructive) {
+                scanner.deleteBuildArtifacts(ids: selected)
+                selected.removeAll()
+            }
+        } message: {
+            Text("This will delete \(selected.count) build artifact folder(s) totaling \(DiskScanner.fmt(selectedSize)).\n\nThey rebuild automatically on next dev/build.")
+        }
     }
 }
 
@@ -369,7 +459,7 @@ struct CachesView: View {
     }
 }
 
-// MARK: - App Data
+// MARK: - App & Dev Data
 
 struct AppDataCard: View {
     let item: AppDataItem
@@ -443,7 +533,7 @@ struct AppDataView: View {
     private var appDataHeader: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("App Data").font(.title2.bold())
+                Text("App & Dev Data").font(.title2.bold())
                 Text("\(DiskScanner.fmt(scanner.totalAppDataSize)) total across \(scanner.appData.count) sources")
                     .foregroundStyle(.secondary)
             }

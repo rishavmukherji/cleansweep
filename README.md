@@ -11,11 +11,15 @@ Built with SwiftUI. No Xcode required — compiles with just the Command Line To
 CleanSweep scans your Mac for common developer disk space hogs and lets you clean them up with a few clicks:
 
 - **node_modules** — finds all `node_modules` directories, shows repo name, size, and last git commit date. Select inactive repos (60+ days) for bulk deletion.
+- **Build Artifacts** — `.next/` and `.turbo/` directories across your projects. Rebuild automatically on next `dev`/`build`.
 - **Caches** — lists `~/Library/Caches` contents by size. Clear individually or all at once.
-- **App Data** — known space hogs like Claude VM bundles, WhatsApp media, OrbStack/Docker, Spotify cache, Telegram cache.
+- **App & Dev Data** — known space hogs including:
+  - App data: Claude VM bundles, WhatsApp media, OrbStack/Docker, Spotify, Telegram
+  - Dev tool caches: pnpm store, npm cache, Yarn cache, Homebrew, CocoaPods, Go modules, Cargo registry, pip, Gradle
+  - System: Trash, Xcode Derived Data
 - **Applications** — lists installed apps sorted by size (info only).
 
-Nothing is deleted without explicit confirmation.
+Only items that exist on your machine are shown. Nothing is deleted without explicit confirmation.
 
 ## Requirements
 
