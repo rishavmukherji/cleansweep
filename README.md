@@ -1,10 +1,8 @@
 # CleanSweep
 
-A native macOS disk cleanup utility built for developers. Targets the stuff that quietly eats your disk — `node_modules` from old projects, app caches, Docker images, and other dev tool bloat.
+A native macOS disk cleanup utility built for developers. Targets the stuff that quietly eats your disk — `node_modules` from old projects, build artifacts, app caches, Docker images, and other dev tool bloat.
 
 Built with SwiftUI. No Xcode required — compiles with just the Command Line Tools.
-
-![CleanSweep screenshot](https://img.shields.io/badge/macOS-14%2B-blue)
 
 ## What it does
 
@@ -26,31 +24,33 @@ Only items that exist on your machine are shown. Nothing is deleted without expl
 - macOS 14+
 - Xcode Command Line Tools (`xcode-select --install`)
 
-## Build & Run
+## Build & Install
 
 ```bash
 git clone https://github.com/rishavmukherji/cleansweep.git
 cd cleansweep
 chmod +x build.sh
 ./build.sh
-open build/CleanSweep.app
 ```
 
-On first launch, macOS may block the app since it's ad-hoc signed. Right-click the app → **Open** to bypass Gatekeeper.
-
-## Install to Applications
+This compiles the app, installs it to `/Applications`, and clears the quarantine flag. Launch it from Spotlight, Launchpad, or:
 
 ```bash
-cp -R build/CleanSweep.app /Applications/
+open /Applications/CleanSweep.app
 ```
 
 ## Project structure
 
 ```
 Sources/
-  App.swift        — App entry point
-  Scanner.swift    — Disk scanning logic and data models
-  Views.swift      — All SwiftUI views
-Info.plist         — App bundle metadata
-build.sh           — Compile, bundle, and sign
+  App.swift           — App entry point
+  Scanner.swift       — Disk scanning logic and data models
+  Views.swift         — All SwiftUI views
+CleanSweep.icns       — App icon
+Info.plist            — App bundle metadata
+build.sh              — Compile, bundle, sign, and install
 ```
+
+## License
+
+MIT

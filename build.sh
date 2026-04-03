@@ -30,6 +30,10 @@ echo "Signing..."
 codesign --force --sign - "$BUILD/$APP.app"
 xattr -cr "$BUILD/$APP.app"
 
+# Install to /Applications and clear quarantine
+cp -R "$BUILD/$APP.app" /Applications/
+xattr -cr "/Applications/$APP.app"
+
 echo ""
-echo "Built: $BUILD/$APP.app"
-echo "Run:   open $BUILD/$APP.app"
+echo "Installed to /Applications/$APP.app"
+echo "Run:   open /Applications/$APP.app"
