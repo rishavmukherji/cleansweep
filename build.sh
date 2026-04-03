@@ -24,9 +24,11 @@ BUNDLE="$BUILD/$APP.app/Contents"
 mkdir -p "$BUNDLE/MacOS" "$BUNDLE/Resources"
 mv "$BUILD/$APP" "$BUNDLE/MacOS/"
 cp Info.plist "$BUNDLE/"
+cp CleanSweep.icns "$BUNDLE/Resources/"
 
 echo "Signing..."
 codesign --force --sign - "$BUILD/$APP.app"
+xattr -cr "$BUILD/$APP.app"
 
 echo ""
 echo "Built: $BUILD/$APP.app"
