@@ -50,6 +50,13 @@ struct AppItem: Identifiable {
     let size: Int64
 }
 
+struct SubItem: Identifiable {
+    let id = UUID()
+    let path: String
+    let name: String
+    let size: Int64
+}
+
 enum ScanCategory: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case nodeModules = "node_modules"
@@ -398,6 +405,31 @@ class DiskScanner: ObservableObject {
             } else {
                 shell("rm -rf '\(item.cleanPath)'/* 2>/dev/null")
             }
+            _scanAppData()
+            _scanDisk()
+        }
+    }
+
+    func scanDirectory(_ path: String, completion: @escaping ([SubItem]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let out = shell("du -sh '\(path)'/* 2>/dev/null | sort -hr")
+            var items: [SubItem] = []
+            for line in out.split(separator: "\n") {
+                let parts = line.split(separator: "\t", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let size = parseSize(String(parts[0]))
+                let p = String(parts[1])
+                let name = (p as NSString).lastPathComponent
+                guard size > 0 else { continue }
+                items.append(SubItem(path: p, name: name, size: size))
+            }
+            DispatchQueue.main.async { completion(items) }
+        }
+    }
+
+    func deleteSubItems(_ paths: [String]) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            for p in paths { shell("rm -rf '\(p)'") }
             _scanAppData()
             _scanDisk()
         }

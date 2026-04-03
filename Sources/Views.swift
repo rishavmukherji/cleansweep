@@ -464,6 +464,7 @@ struct CachesView: View {
 struct AppDataCard: View {
     let item: AppDataItem
     let onClean: () -> Void
+    let onTap: () -> Void
 
     private var sizeColor: Color {
         if item.size > 1_073_741_824 { return .red }
@@ -490,21 +491,27 @@ struct AppDataCard: View {
                 .monospacedDigit()
                 .foregroundColor(sizeColor)
 
-            Button("Clean") { onClean() }
+            Button("Clean All") { onClean() }
                 .buttonStyle(.bordered)
                 .disabled(item.size == 0)
+
+            Image(systemName: "chevron.right")
+                .foregroundStyle(.tertiary)
         }
         .padding()
         .background(RoundedRectangle(cornerRadius: 10)
             .fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 10)
             .stroke(Color.gray.opacity(0.2)))
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
     }
 }
 
 struct AppDataView: View {
     @EnvironmentObject var scanner: DiskScanner
     @State private var itemToClean: AppDataItem?
+    @State private var drillDownItem: AppDataItem?
 
     private var isShowingAlert: Binding<Bool> {
         Binding(
@@ -514,10 +521,41 @@ struct AppDataView: View {
     }
 
     var body: some View {
+        Group {
+            if let item = drillDownItem {
+                AppDataDetailView(item: item, onBack: { drillDownItem = nil })
+            } else {
+                mainList
+            }
+        }
+    }
+
+    private var mainList: some View {
         VStack(spacing: 0) {
-            appDataHeader
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("App & Dev Data").font(.title2.bold())
+                    Text("\(DiskScanner.fmt(scanner.totalAppDataSize)) total across \(scanner.appData.count) sources")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding()
+
             Divider()
-            appDataList
+
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(scanner.appData) { item in
+                        AppDataCard(
+                            item: item,
+                            onClean: { itemToClean = item },
+                            onTap: { drillDownItem = item }
+                        )
+                    }
+                }
+                .padding()
+            }
         }
         .alert("Clean \(itemToClean?.name ?? "")?", isPresented: isShowingAlert) {
             Button("Cancel", role: .cancel) { itemToClean = nil }
@@ -529,27 +567,116 @@ struct AppDataView: View {
             Text(itemToClean.map { "\($0.desc)\n\nThis will free \(DiskScanner.fmt($0.size))." } ?? "")
         }
     }
+}
 
-    private var appDataHeader: some View {
+struct AppDataDetailView: View {
+    @EnvironmentObject var scanner: DiskScanner
+    let item: AppDataItem
+    let onBack: () -> Void
+    @State private var contents: [SubItem] = []
+    @State private var selected = Set<UUID>()
+    @State private var isScanning = true
+    @State private var showConfirm = false
+
+    var selectedSize: Int64 {
+        contents.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.size }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            detailHeader
+            Divider()
+            detailActions
+            Divider()
+            detailList
+        }
+        .onAppear {
+            scanner.scanDirectory(item.path) { items in
+                contents = items
+                isScanning = false
+            }
+        }
+        .alert("Delete selected items?", isPresented: $showConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete \(selected.count) items", role: .destructive) {
+                let paths = contents.filter { selected.contains($0.id) }.map(\.path)
+                scanner.deleteSubItems(paths)
+                contents.removeAll { selected.contains($0.id) }
+                selected.removeAll()
+            }
+        } message: {
+            Text("Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?")
+        }
+    }
+
+    private var detailHeader: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("App & Dev Data").font(.title2.bold())
-                Text("\(DiskScanner.fmt(scanner.totalAppDataSize)) total across \(scanner.appData.count) sources")
+            Button(action: onBack) {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                    Text("Back")
+                }
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(item.name).font(.title2.bold())
+                Text("\(DiskScanner.fmt(item.size)) total")
                     .foregroundStyle(.secondary)
             }
-            Spacer()
         }
         .padding()
     }
 
-    private var appDataList: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                ForEach(scanner.appData) { item in
-                    AppDataCard(item: item) { itemToClean = item }
+    private var detailActions: some View {
+        HStack {
+            Button("Select All") { selected = Set(contents.map(\.id)) }
+                .buttonStyle(.bordered)
+            Button("Deselect All") { selected.removeAll() }
+                .buttonStyle(.bordered)
+                .disabled(selected.isEmpty)
+            Spacer()
+            Button("Delete Selected (\(DiskScanner.fmt(selectedSize)))") { showConfirm = true }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(selected.isEmpty)
+        }
+        .padding(.horizontal).padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var detailList: some View {
+        if isScanning {
+            Spacer()
+            ProgressView("Scanning contents...")
+            Spacer()
+        } else if contents.isEmpty {
+            Spacer()
+            Text("No scannable contents found").foregroundStyle(.secondary)
+            Spacer()
+        } else {
+            List {
+                ForEach(contents) { sub in
+                    HStack {
+                        Toggle("", isOn: Binding(
+                            get: { selected.contains(sub.id) },
+                            set: { v in if v { selected.insert(sub.id) } else { selected.remove(sub.id) } }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .frame(width: 24)
+
+                        Text(sub.name)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(DiskScanner.fmt(sub.size))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
                 }
             }
-            .padding()
+            .listStyle(.plain)
         }
     }
 }

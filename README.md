@@ -15,6 +15,7 @@ CleanSweep scans your Mac for common developer disk space hogs and lets you clea
   - App data: Claude VM bundles, WhatsApp media, OrbStack/Docker, Spotify, Telegram
   - Dev tool caches: pnpm store, npm cache, Yarn cache, Homebrew, CocoaPods, Go modules, Cargo registry, pip, Gradle
   - System: Trash, Xcode Derived Data
+  - Click any item to drill into its contents and selectively delete individual files/folders
 - **Applications** — lists installed apps sorted by size (info only).
 
 Only items that exist on your machine are shown. Nothing is deleted without explicit confirmation.

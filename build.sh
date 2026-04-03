@@ -28,11 +28,13 @@ cp CleanSweep.icns "$BUNDLE/Resources/"
 
 echo "Signing..."
 codesign --force --sign - "$BUILD/$APP.app"
-xattr -cr "$BUILD/$APP.app"
 
-# Install to /Applications and clear quarantine
-cp -R "$BUILD/$APP.app" /Applications/
+# Install to /Applications, clear ALL extended attributes including quarantine
+rm -rf "/Applications/$APP.app"
+cp -R "$BUILD/$APP.app" "/Applications/"
 xattr -cr "/Applications/$APP.app"
+# Also mark as approved by the user via spctl
+spctl --add "/Applications/$APP.app" 2>/dev/null || true
 
 echo ""
 echo "Installed to /Applications/$APP.app"
