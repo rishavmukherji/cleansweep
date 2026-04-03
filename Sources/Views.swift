@@ -1,4 +1,11 @@
 import SwiftUI
+import AppKit
+
+// MARK: - Helpers
+
+private func showInFinder(_ path: String) {
+    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+}
 
 // MARK: - Content View
 
@@ -227,6 +234,9 @@ struct NodeModulesView: View {
                     .buttonStyle(.bordered)
                 Button("Select All") { selected = Set(scanner.nodeModules.map(\.id)) }
                     .buttonStyle(.bordered)
+                Button("Deselect All") { selected.removeAll() }
+                    .buttonStyle(.bordered)
+                    .disabled(selected.isEmpty)
                 Button("Delete Selected (\(DiskScanner.fmt(selectedSize)))") { showConfirm = true }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
@@ -274,6 +284,9 @@ struct NodeModulesView: View {
                             .foregroundStyle(isOld(item.lastCommitDate) ? .red : .secondary)
                     }
                     .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Show in Finder") { showInFinder(item.path) }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -326,6 +339,9 @@ struct BuildArtifactsView: View {
                 Spacer()
                 Button("Select All") { selected = Set(scanner.buildArtifacts.map(\.id)) }
                     .buttonStyle(.bordered)
+                Button("Deselect All") { selected.removeAll() }
+                    .buttonStyle(.bordered)
+                    .disabled(selected.isEmpty)
                 Button("Delete Selected (\(DiskScanner.fmt(selectedSize)))") { showConfirm = true }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
@@ -380,6 +396,9 @@ struct BuildArtifactsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Show in Finder") { showInFinder(item.path) }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -433,6 +452,9 @@ struct CachesView: View {
                         .controlSize(.small)
                 }
                 .padding(.vertical, 4)
+                .contextMenu {
+                    Button("Show in Finder") { showInFinder(item.path) }
+                }
             }
             .listStyle(.plain)
         }
@@ -482,6 +504,7 @@ struct AppDataCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.name).fontWeight(.semibold)
                 Text(item.desc).font(.caption).foregroundStyle(.secondary)
+                Text(item.path).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             }
 
             Spacer()
@@ -505,6 +528,9 @@ struct AppDataCard: View {
             .stroke(Color.gray.opacity(0.2)))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
+        .contextMenu {
+            Button("Show in Finder") { showInFinder(item.path) }
+        }
     }
 }
 
@@ -623,6 +649,11 @@ struct AppDataDetailView: View {
                 Text(item.name).font(.title2.bold())
                 Text("\(DiskScanner.fmt(item.size)) total")
                     .foregroundStyle(.secondary)
+                Text(item.path)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
             }
         }
         .padding()
@@ -674,6 +705,9 @@ struct AppDataDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 2)
+                    .contextMenu {
+                        Button("Show in Finder") { showInFinder(sub.path) }
+                    }
                 }
             }
             .listStyle(.plain)
@@ -714,6 +748,9 @@ struct AppsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 2)
+                .contextMenu {
+                    Button("Show in Finder") { showInFinder(app.path) }
+                }
             }
             .listStyle(.plain)
         }
