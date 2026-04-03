@@ -1,12 +1,14 @@
 # CleanSweep
 
-A native macOS disk cleanup utility built with SwiftUI. No Xcode required — compiles with just the Command Line Tools.
+A native macOS disk cleanup utility built for developers. Targets the stuff that quietly eats your disk — `node_modules` from old projects, app caches, Docker images, and other dev tool bloat.
+
+Built with SwiftUI. No Xcode required — compiles with just the Command Line Tools.
 
 ![CleanSweep screenshot](https://img.shields.io/badge/macOS-14%2B-blue)
 
 ## What it does
 
-CleanSweep scans your Mac for common disk space hogs and lets you clean them up with a few clicks:
+CleanSweep scans your Mac for common developer disk space hogs and lets you clean them up with a few clicks:
 
 - **node_modules** — finds all `node_modules` directories, shows repo name, size, and last git commit date. Select inactive repos (60+ days) for bulk deletion.
 - **Caches** — lists `~/Library/Caches` contents by size. Clear individually or all at once.
