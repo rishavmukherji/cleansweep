@@ -628,8 +628,18 @@ struct AppDataDetailView: View {
                 selected.removeAll()
             }
         } message: {
-            Text("Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?")
+            Text(deleteConfirmMessage)
         }
+    }
+
+    private var deleteConfirmMessage: String {
+        let base = "Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?"
+        let warnings = contents
+            .filter { selected.contains($0.id) }
+            .compactMap(\.warning)
+        let unique = Array(NSOrderedSet(array: warnings)) as? [String] ?? []
+        if unique.isEmpty { return base }
+        return base + "\n\n⚠️ " + unique.joined(separator: "\n\n⚠️ ")
     }
 
     private func loadContents() {
@@ -802,6 +812,19 @@ struct AppDataDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .padding(.leading, 32)
                                 .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        if let warning = sub.warning {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.caption2)
+                                Text(warning)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.leading, 32)
                         }
 
                         if let repos = sub.referencingRepos {

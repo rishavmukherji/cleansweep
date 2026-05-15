@@ -57,6 +57,7 @@ struct SubItem: Identifiable {
     let size: Int64
     var referencingRepos: [String]? = nil
     var note: String? = nil
+    var warning: String? = nil
     var deleteShellCommand: String? = nil
 }
 
@@ -497,15 +498,20 @@ class DiskScanner: ObservableObject {
                       note: "VM firmware state. Tiny — only useful as part of clearing the whole bundle."),
             ]
 
+            let openSet = openFilesIn(bundlePath)
+            let liveWarning = "Claude VM is running and holds this file open. Deleting succeeds, but disk space won't actually free until every Claude Code session exits and the VM shuts down."
+
             var items: [SubItem] = []
 
             for entry in bundleEntries {
                 let p = "\(bundlePath)/\(entry.file)"
                 guard let attrs = try? FileManager.default.attributesOfItem(atPath: p),
                       let size = attrs[.size] as? Int64, size > 0 else { continue }
+                let isLive = openSet.contains(p)
                 items.append(SubItem(
                     path: p, name: entry.name, size: size,
                     note: entry.note,
+                    warning: isLive ? liveWarning : nil,
                     deleteShellCommand: "rm -f '\(p)'"
                 ))
             }
@@ -527,6 +533,11 @@ class DiskScanner: ObservableObject {
             items.sort { $0.size > $1.size }
             DispatchQueue.main.async { completion(items) }
         }
+    }
+
+    private func openFilesIn(_ directory: String) -> Set<String> {
+        let out = shell("/usr/sbin/lsof +D '\(directory)' 2>/dev/null | /usr/bin/awk 'NR>1 {for(i=9;i<=NF;i++) printf \"%s%s\", $i, (i==NF?\"\\n\":\" \")}'")
+        return Set(out.split(separator: "\n").map(String.init))
     }
 
     func isOrbStackRunning() -> Bool {
