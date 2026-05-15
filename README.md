@@ -16,6 +16,10 @@ CleanSweep scans your Mac for common developer disk space hogs and lets you clea
   - Dev tool caches: pnpm store, npm cache, Yarn cache, Homebrew, CocoaPods, Go modules, Cargo registry, pip, Gradle
   - System: Trash, Xcode Derived Data
   - Click any item to drill into its contents and selectively delete individual files/folders
+  - Smart attribution for select drill-downs:
+    - **pnpm Store** — maps each store version (v3/v10/v11) to the repos referencing it; flags orphaned versions as "Unreferenced — safe to clear"
+    - **Claude VM Bundles** — breaks the bundle into `rootfs.img`, `rootfs.img.zst`, `sessiondata.img` with per-file impact notes; reassures that chat history is unaffected; warns when a file is held open by the live VM (deletion succeeds but space reclaim is deferred until the VM shuts down)
+    - **OrbStack / Docker** — when the daemon is running, lists individual images, containers, volumes, and the build cache with their compose-project label, and uses the right `docker rmi` / `rm` / `volume rm` / `builder prune` command per row; offers a Start OrbStack button when stopped
 - **Applications** — lists installed apps sorted by size (info only).
 
 Only items that exist on your machine are shown. Nothing is deleted without explicit confirmation.
