@@ -607,9 +607,8 @@ class DiskScanner: ObservableObject {
                 ))
             }
 
-            // Volumes (with sizes via system df -v)
             let volumesOut = shell(
-                "'\(docker)' system df -v --format '{{range .Volumes}}{{.Name}}|{{.Size}}|{{index .Labels \"com.docker.compose.project\"}}{{\"\\n\"}}{{end}}' 2>/dev/null"
+                "'\(docker)' system df -v --format '{{range .Volumes}}{{.Name}}|{{.Size}}|{{.Labels}}\n{{end}}' 2>/dev/null"
             )
             for line in volumesOut.split(separator: "\n") {
                 let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
@@ -617,8 +616,10 @@ class DiskScanner: ObservableObject {
                 let name = parts[0]
                 let size = parseSize(parts[1])
                 guard size > 0 else { continue }
-                let projectRaw = parts.count > 2 ? parts[2] : ""
-                let project = (projectRaw.isEmpty || projectRaw == "<no value>") ? nil : projectRaw
+                let labels = parts.count > 2 ? parts[2] : ""
+                let project = labels.split(separator: ",")
+                    .first(where: { $0.hasPrefix(composeKey) })
+                    .map { String($0.dropFirst(composeKey.count)) }
                 items.append(SubItem(
                     path: name,
                     name: "Volume: \(name)",
