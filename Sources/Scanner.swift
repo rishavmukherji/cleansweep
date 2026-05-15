@@ -55,6 +55,7 @@ struct SubItem: Identifiable {
     let path: String
     let name: String
     let size: Int64
+    var referencingRepos: [String]? = nil
 }
 
 enum ScanCategory: String, CaseIterable, Identifiable {
@@ -408,6 +409,67 @@ class DiskScanner: ObservableObject {
             _scanAppData()
             _scanDisk()
         }
+    }
+
+    func scanPnpmStore(_ storePath: String, completion: @escaping ([SubItem]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let duOut = shell("du -sh '\(storePath)'/* 2>/dev/null | sort -hr")
+            var versions: [(name: String, path: String, size: Int64)] = []
+            for line in duOut.split(separator: "\n") {
+                let parts = line.split(separator: "\t", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let size = parseSize(String(parts[0]))
+                let p = String(parts[1])
+                let name = (p as NSString).lastPathComponent
+                guard size > 0 else { continue }
+                versions.append((name, p, size))
+            }
+
+            let modOut = shell(
+                "find '\(home)' -maxdepth 6 -name '.modules.yaml' -path '*/node_modules/*' "
+                + "-not -path '*/Library/*' "
+                + "-not -path '*/node_modules/*/node_modules/*' 2>/dev/null "
+                + "| xargs grep -H storeDir 2>/dev/null"
+            )
+
+            var versionToRepos: [String: [String]] = [:]
+            for line in modOut.split(separator: "\n") where !line.isEmpty {
+                let s = String(line)
+                guard let colonIdx = s.firstIndex(of: ":") else { continue }
+                let modPath = String(s[..<colonIdx])
+                let matchLine = String(s[s.index(after: colonIdx)...])
+                guard let storeDir = Self.parseStoreDir(matchLine) else { continue }
+                let versionName = (storeDir as NSString).lastPathComponent
+
+                let repoPath = modPath.replacingOccurrences(of: "/node_modules/.modules.yaml", with: "")
+                let segments = repoPath.split(separator: "/")
+                let repoName = segments.suffix(2).joined(separator: "/")
+
+                versionToRepos[versionName, default: []].append(repoName)
+            }
+
+            var items: [SubItem] = []
+            for v in versions {
+                let repos = (versionToRepos[v.name] ?? []).sorted()
+                items.append(SubItem(path: v.path, name: v.name, size: v.size, referencingRepos: repos))
+            }
+            DispatchQueue.main.async { completion(items) }
+        }
+    }
+
+    private static func parseStoreDir(_ line: String) -> String? {
+        guard let range = line.range(of: "storeDir") else { return nil }
+        let after = line[range.upperBound...]
+        guard let colonIdx = after.firstIndex(of: ":") else { return nil }
+        var value = String(after[after.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("\"") {
+            value.removeFirst()
+            if let q = value.firstIndex(of: "\"") { value = String(value[..<q]) }
+        } else {
+            if value.hasSuffix(",") { value.removeLast() }
+            value = value.trimmingCharacters(in: .whitespaces)
+        }
+        return value.isEmpty ? nil : value
     }
 
     func scanDirectory(_ path: String, completion: @escaping ([SubItem]) -> Void) {
