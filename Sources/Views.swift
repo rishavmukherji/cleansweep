@@ -603,6 +603,7 @@ struct AppDataDetailView: View {
     @State private var selected = Set<UUID>()
     @State private var isScanning = true
     @State private var showConfirm = false
+    @State private var orbDaemonRunning: Bool? = nil
 
     var selectedSize: Int64 {
         contents.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.size }
@@ -617,27 +618,39 @@ struct AppDataDetailView: View {
             Divider()
             detailList
         }
-        .onAppear {
-            let handler: ([SubItem]) -> Void = { items in
-                contents = items
-                isScanning = false
-            }
-            if item.name == "pnpm Store" {
-                scanner.scanPnpmStore(item.path, completion: handler)
-            } else {
-                scanner.scanDirectory(item.path, completion: handler)
-            }
-        }
+        .onAppear { loadContents() }
         .alert("Delete selected items?", isPresented: $showConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Delete \(selected.count) items", role: .destructive) {
-                let paths = contents.filter { selected.contains($0.id) }.map(\.path)
-                scanner.deleteSubItems(paths)
+                let toDelete = contents.filter { selected.contains($0.id) }
+                scanner.deleteSubItems(toDelete)
                 contents.removeAll { selected.contains($0.id) }
                 selected.removeAll()
             }
         } message: {
             Text("Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?")
+        }
+    }
+
+    private func loadContents() {
+        isScanning = true
+        let handler: ([SubItem]) -> Void = { items in
+            contents = items
+            isScanning = false
+        }
+        switch item.name {
+        case "pnpm Store":
+            scanner.scanPnpmStore(item.path, completion: handler)
+        case "Claude VM Bundles":
+            scanner.scanClaudeVMBundles(item.path, completion: handler)
+        case "OrbStack / Docker":
+            scanner.scanOrbStack { items, running in
+                contents = items
+                orbDaemonRunning = running
+                isScanning = false
+            }
+        default:
+            scanner.scanDirectory(item.path, completion: handler)
         }
     }
 
@@ -662,6 +675,30 @@ struct AppDataDetailView: View {
             .padding(.horizontal)
             .padding(.vertical, 10)
             .background(Color.blue.opacity(0.08))
+        } else if item.name == "OrbStack / Docker", orbDaemonRunning == false {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("OrbStack is stopped. Start it to see what's using space inside (images, containers, volumes, build cache).")
+                        .font(.callout)
+                    HStack(spacing: 8) {
+                        Button("Start OrbStack") {
+                            scanner.startOrbStack()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Re-check") {
+                            loadContents()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .background(Color.orange.opacity(0.10))
         }
     }
 
@@ -757,6 +794,14 @@ struct AppDataDetailView: View {
                             Text(DiskScanner.fmt(sub.size))
                                 .monospacedDigit()
                                 .foregroundStyle(.secondary)
+                        }
+
+                        if let note = sub.note {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 32)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
 
                         if let repos = sub.referencingRepos {
