@@ -603,6 +603,7 @@ struct AppDataDetailView: View {
     @State private var selected = Set<UUID>()
     @State private var isScanning = true
     @State private var showConfirm = false
+    @State private var orbDaemonRunning: Bool? = nil
 
     var selectedSize: Int64 {
         contents.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.size }
@@ -611,28 +612,127 @@ struct AppDataDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             detailHeader
+            infoBanner
             Divider()
             detailActions
             Divider()
             detailList
         }
-        .onAppear {
-            scanner.scanDirectory(item.path) { items in
-                contents = items
-                isScanning = false
-            }
-        }
+        .onAppear { loadContents() }
         .alert("Delete selected items?", isPresented: $showConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Delete \(selected.count) items", role: .destructive) {
-                let paths = contents.filter { selected.contains($0.id) }.map(\.path)
-                scanner.deleteSubItems(paths)
+                let toDelete = contents.filter { selected.contains($0.id) }
+                scanner.deleteSubItems(toDelete)
                 contents.removeAll { selected.contains($0.id) }
                 selected.removeAll()
             }
         } message: {
-            Text("Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?")
+            Text(deleteConfirmMessage)
         }
+    }
+
+    private var deleteConfirmMessage: String {
+        let base = "Delete \(selected.count) item(s) totaling \(DiskScanner.fmt(selectedSize))?"
+        let warnings = contents
+            .filter { selected.contains($0.id) }
+            .compactMap(\.warning)
+        let unique = Array(NSOrderedSet(array: warnings)) as? [String] ?? []
+        if unique.isEmpty { return base }
+        return base + "\n\n⚠️ " + unique.joined(separator: "\n\n⚠️ ")
+    }
+
+    private func loadContents() {
+        isScanning = true
+        let handler: ([SubItem]) -> Void = { items in
+            contents = items
+            isScanning = false
+        }
+        switch item.name {
+        case "pnpm Store":
+            scanner.scanPnpmStore(item.path, completion: handler)
+        case "Claude VM Bundles":
+            scanner.scanClaudeVMBundles(item.path, completion: handler)
+        case "OrbStack / Docker":
+            scanner.scanOrbStack { items, running in
+                contents = items
+                orbDaemonRunning = running
+                isScanning = false
+            }
+        default:
+            scanner.scanDirectory(item.path, completion: handler)
+        }
+    }
+
+    @ViewBuilder
+    private var infoBanner: some View {
+        if item.name == "Claude VM Bundles" {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(.blue)
+                    .font(.callout)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Clearing this affects no chat history — only forces the sandbox base image to redownload on next use.")
+                        .font(.callout)
+                    if let date = lastBootedString {
+                        Text("Last booted: \(date)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .background(Color.blue.opacity(0.08))
+        } else if item.name == "OrbStack / Docker", orbDaemonRunning == false {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.callout)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("OrbStack is stopped. Start it to see what's using space inside (images, containers, volumes, build cache).")
+                        .font(.callout)
+                    HStack(spacing: 8) {
+                        Button("Start OrbStack") {
+                            scanner.startOrbStack()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Re-check") {
+                            loadContents()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .background(Color.orange.opacity(0.10))
+        }
+    }
+
+    private var lastBootedString: String? {
+        let candidates = [
+            "\(item.path)/claudevm.bundle/sessiondata.img",
+            "\(item.path)/claudevm.bundle/vmIP",
+        ]
+        for path in candidates {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let date = attrs[.modificationDate] as? Date else { continue }
+            let fmt = DateFormatter()
+            fmt.dateStyle = .medium
+            fmt.timeStyle = .none
+            let days = Int(Date().timeIntervalSince(date) / 86400)
+            let relative: String
+            if days < 1 { relative = "today" }
+            else if days == 1 { relative = "1 day ago" }
+            else if days < 30 { relative = "\(days) days ago" }
+            else if days < 365 { relative = "\(days / 30) months ago" }
+            else { relative = "\(days / 365)+ years ago" }
+            return "\(fmt.string(from: date)) (\(relative))"
+        }
+        return nil
     }
 
     private var detailHeader: some View {
@@ -688,21 +788,65 @@ struct AppDataDetailView: View {
         } else {
             List {
                 ForEach(contents) { sub in
-                    HStack {
-                        Toggle("", isOn: Binding(
-                            get: { selected.contains(sub.id) },
-                            set: { v in if v { selected.insert(sub.id) } else { selected.remove(sub.id) } }
-                        ))
-                        .toggleStyle(.checkbox)
-                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Toggle("", isOn: Binding(
+                                get: { selected.contains(sub.id) },
+                                set: { v in if v { selected.insert(sub.id) } else { selected.remove(sub.id) } }
+                            ))
+                            .toggleStyle(.checkbox)
+                            .frame(width: 24)
 
-                        Text(sub.name)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(sub.name)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text(DiskScanner.fmt(sub.size))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            Text(DiskScanner.fmt(sub.size))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if let note = sub.note {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 32)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        if let warning = sub.warning {
+                            HStack(alignment: .top, spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.caption2)
+                                Text(warning)
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.leading, 32)
+                        }
+
+                        if let repos = sub.referencingRepos {
+                            if repos.isEmpty {
+                                Text("Unreferenced — safe to clear")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                    .padding(.leading, 32)
+                            } else {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Used by \(repos.count) repo\(repos.count == 1 ? "" : "s"):")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    ForEach(repos, id: \.self) { repo in
+                                        Text("• \(repo)")
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                                .padding(.leading, 32)
+                            }
+                        }
                     }
                     .padding(.vertical, 2)
                     .contextMenu {

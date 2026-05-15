@@ -55,6 +55,10 @@ struct SubItem: Identifiable {
     let path: String
     let name: String
     let size: Int64
+    var referencingRepos: [String]? = nil
+    var note: String? = nil
+    var warning: String? = nil
+    var deleteShellCommand: String? = nil
 }
 
 enum ScanCategory: String, CaseIterable, Identifiable {
@@ -124,15 +128,17 @@ class DiskScanner: ObservableObject {
     func parseSize(_ s: String) -> Int64 {
         let t = s.trimmingCharacters(in: .whitespaces)
         guard !t.isEmpty, t != "0B" else { return 0 }
-        let numStr: String
-        let mult: Double
-        if t.hasSuffix("T") { numStr = String(t.dropLast()); mult = 1_099_511_627_776 }
-        else if t.hasSuffix("G") { numStr = String(t.dropLast()); mult = 1_073_741_824 }
-        else if t.hasSuffix("M") { numStr = String(t.dropLast()); mult = 1_048_576 }
-        else if t.hasSuffix("K") { numStr = String(t.dropLast()); mult = 1024 }
-        else if t.hasSuffix("B") { numStr = String(t.dropLast()); mult = 1 }
-        else { numStr = t; mult = 1 }
-        return Int64((Double(numStr) ?? 0) * mult)
+        let suffixes: [(String, Double)] = [
+            ("TB", 1_099_511_627_776), ("GB", 1_073_741_824),
+            ("MB", 1_048_576), ("kB", 1024), ("KB", 1024),
+            ("T", 1_099_511_627_776), ("G", 1_073_741_824),
+            ("M", 1_048_576), ("K", 1024), ("B", 1),
+        ]
+        for (suffix, mult) in suffixes where t.hasSuffix(suffix) {
+            let numStr = String(t.dropLast(suffix.count))
+            return Int64((Double(numStr) ?? 0) * mult)
+        }
+        return Int64(Double(t) ?? 0)
     }
 
     static func fmt(_ bytes: Int64) -> String {
@@ -410,6 +416,255 @@ class DiskScanner: ObservableObject {
         }
     }
 
+    func scanPnpmStore(_ storePath: String, completion: @escaping ([SubItem]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let duOut = shell("du -sh '\(storePath)'/* 2>/dev/null | sort -hr")
+            var versions: [(name: String, path: String, size: Int64)] = []
+            for line in duOut.split(separator: "\n") {
+                let parts = line.split(separator: "\t", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let size = parseSize(String(parts[0]))
+                let p = String(parts[1])
+                let name = (p as NSString).lastPathComponent
+                guard size > 0 else { continue }
+                versions.append((name, p, size))
+            }
+
+            let modOut = shell(
+                "find '\(home)' -maxdepth 6 -name '.modules.yaml' -path '*/node_modules/*' "
+                + "-not -path '*/Library/*' "
+                + "-not -path '*/node_modules/*/node_modules/*' 2>/dev/null "
+                + "| xargs grep -H storeDir 2>/dev/null"
+            )
+
+            var versionToRepos: [String: [String]] = [:]
+            for line in modOut.split(separator: "\n") where !line.isEmpty {
+                let s = String(line)
+                guard let colonIdx = s.firstIndex(of: ":") else { continue }
+                let modPath = String(s[..<colonIdx])
+                let matchLine = String(s[s.index(after: colonIdx)...])
+                guard let storeDir = Self.parseStoreDir(matchLine) else { continue }
+                let versionName = (storeDir as NSString).lastPathComponent
+
+                let repoPath = modPath.replacingOccurrences(of: "/node_modules/.modules.yaml", with: "")
+                let segments = repoPath.split(separator: "/")
+                let repoName = segments.suffix(2).joined(separator: "/")
+
+                versionToRepos[versionName, default: []].append(repoName)
+            }
+
+            var items: [SubItem] = []
+            for v in versions {
+                let repos = (versionToRepos[v.name] ?? []).sorted()
+                items.append(SubItem(path: v.path, name: v.name, size: v.size, referencingRepos: repos))
+            }
+            DispatchQueue.main.async { completion(items) }
+        }
+    }
+
+    private static func parseStoreDir(_ line: String) -> String? {
+        guard let range = line.range(of: "storeDir") else { return nil }
+        let after = line[range.upperBound...]
+        guard let colonIdx = after.firstIndex(of: ":") else { return nil }
+        var value = String(after[after.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("\"") {
+            value.removeFirst()
+            if let q = value.firstIndex(of: "\"") { value = String(value[..<q]) }
+        } else {
+            if value.hasSuffix(",") { value.removeLast() }
+            value = value.trimmingCharacters(in: .whitespaces)
+        }
+        return value.isEmpty ? nil : value
+    }
+
+    func scanClaudeVMBundles(_ rootPath: String, completion: @escaping ([SubItem]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let bundlePath = "\(rootPath)/claudevm.bundle"
+            let warmPath = "\(rootPath)/warm"
+
+            struct Entry { let file: String; let name: String; let note: String }
+            let bundleEntries: [Entry] = [
+                Entry(file: "rootfs.img",
+                      name: "rootfs.img (live VM filesystem)",
+                      note: "The running VM disk. Delete to force re-extraction from rootfs.img.zst on next sandbox use (no download)."),
+                Entry(file: "rootfs.img.zst",
+                      name: "rootfs.img.zst (compressed seed)",
+                      note: "Compressed base image used to rebuild rootfs.img. Delete to force a fresh download (~2 GB) on next sandbox use."),
+                Entry(file: "sessiondata.img",
+                      name: "sessiondata.img (session overlay)",
+                      note: "Writable overlay for the current/last sandbox session. Delete to reset session VM state only."),
+                Entry(file: "efivars.fd",
+                      name: "efivars.fd (UEFI variables)",
+                      note: "VM firmware state. Tiny — only useful as part of clearing the whole bundle."),
+            ]
+
+            let openSet = openFilesIn(bundlePath)
+            let liveWarning = "Claude VM is running and holds this file open. Deleting succeeds, but disk space won't actually free until every Claude Code session exits and the VM shuts down."
+
+            var items: [SubItem] = []
+
+            for entry in bundleEntries {
+                let p = "\(bundlePath)/\(entry.file)"
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: p),
+                      let size = attrs[.size] as? Int64, size > 0 else { continue }
+                let isLive = openSet.contains(p)
+                items.append(SubItem(
+                    path: p, name: entry.name, size: size,
+                    note: entry.note,
+                    warning: isLive ? liveWarning : nil,
+                    deleteShellCommand: "rm -f '\(p)'"
+                ))
+            }
+
+            if FileManager.default.fileExists(atPath: warmPath) {
+                let sizeStr = shell("du -sh '\(warmPath)' 2>/dev/null | cut -f1")
+                let size = parseSize(sizeStr)
+                if size > 0 {
+                    items.append(SubItem(
+                        path: warmPath,
+                        name: "warm/ (pre-warmed VM cache)",
+                        size: size,
+                        note: "Cached pre-built layer for faster VM boot. Safe to clear; regenerates as needed.",
+                        deleteShellCommand: "rm -rf '\(warmPath)'"
+                    ))
+                }
+            }
+
+            items.sort { $0.size > $1.size }
+            DispatchQueue.main.async { completion(items) }
+        }
+    }
+
+    private func openFilesIn(_ directory: String) -> Set<String> {
+        let out = shell("/usr/sbin/lsof +D '\(directory)' 2>/dev/null | /usr/bin/awk 'NR>1 {for(i=9;i<=NF;i++) printf \"%s%s\", $i, (i==NF?\"\\n\":\" \")}'")
+        return Set(out.split(separator: "\n").map(String.init))
+    }
+
+    func isOrbStackRunning() -> Bool {
+        return FileManager.default.fileExists(atPath: "\(home)/.orbstack/run/docker.sock")
+    }
+
+    private func resolveDockerBin() -> String? {
+        let candidates = [
+            "/usr/local/bin/docker",
+            "/opt/homebrew/bin/docker",
+            "\(home)/.orbstack/bin/docker",
+        ]
+        for c in candidates where FileManager.default.isExecutableFile(atPath: c) {
+            return c
+        }
+        return nil
+    }
+
+    func startOrbStack() {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            shell("/usr/bin/open -a OrbStack")
+        }
+    }
+
+    func scanOrbStack(completion: @escaping ([SubItem], Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            guard isOrbStackRunning(), let docker = resolveDockerBin() else {
+                DispatchQueue.main.async { completion([], false) }
+                return
+            }
+
+            var items: [SubItem] = []
+            let composeKey = "com.docker.compose.project="
+
+            // Images
+            let imagesOut = shell("'\(docker)' images --format '{{.ID}}|{{.Repository}}|{{.Tag}}|{{.Size}}' 2>/dev/null")
+            for line in imagesOut.split(separator: "\n") {
+                let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count == 4 else { continue }
+                let id = parts[0], repo = parts[1], tag = parts[2]
+                let size = parseSize(parts[3])
+                guard size > 0 else { continue }
+                let isDangling = (repo == "<none>" || tag == "<none>")
+                let display = isDangling ? "\(id) (dangling)" : "\(repo):\(tag)"
+                items.append(SubItem(
+                    path: id,
+                    name: "Image: \(display)",
+                    size: size,
+                    note: isDangling ? "Untagged image. Usually safe to remove." : nil,
+                    deleteShellCommand: "'\(docker)' rmi -f '\(id)' 2>/dev/null"
+                ))
+            }
+
+            // Containers (all)
+            let containersOut = shell(
+                "'\(docker)' ps -a --size --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Size}}|{{.Labels}}' 2>/dev/null"
+            )
+            for line in containersOut.split(separator: "\n") {
+                let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count == 6 else { continue }
+                let id = parts[0], name = parts[1], image = parts[2], status = parts[3]
+                let sizeStr = parts[4].split(separator: " ").first.map(String.init) ?? "0B"
+                let size = parseSize(sizeStr)
+                let labels = parts[5]
+                let project = labels.split(separator: ",")
+                    .first(where: { $0.hasPrefix(composeKey) })
+                    .map { String($0.dropFirst(composeKey.count)) }
+                let running = status.lowercased().hasPrefix("up")
+                var noteParts = ["image: \(image)"]
+                if let p = project { noteParts.append("project: \(p)") }
+                noteParts.append(running ? "running" : "stopped")
+                items.append(SubItem(
+                    path: id,
+                    name: "Container: \(name)",
+                    size: size,
+                    note: noteParts.joined(separator: " · "),
+                    deleteShellCommand: "'\(docker)' rm -f '\(id)' 2>/dev/null"
+                ))
+            }
+
+            let volumesOut = shell(
+                "'\(docker)' system df -v --format '{{range .Volumes}}{{.Name}}|{{.Size}}|{{.Labels}}\n{{end}}' 2>/dev/null"
+            )
+            for line in volumesOut.split(separator: "\n") {
+                let parts = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count >= 2 else { continue }
+                let name = parts[0]
+                let size = parseSize(parts[1])
+                guard size > 0 else { continue }
+                let labels = parts.count > 2 ? parts[2] : ""
+                let project = labels.split(separator: ",")
+                    .first(where: { $0.hasPrefix(composeKey) })
+                    .map { String($0.dropFirst(composeKey.count)) }
+                items.append(SubItem(
+                    path: name,
+                    name: "Volume: \(name)",
+                    size: size,
+                    note: project.map { "project: \($0)" },
+                    deleteShellCommand: "'\(docker)' volume rm '\(name)' 2>/dev/null"
+                ))
+            }
+
+            // Build cache (aggregate)
+            let bcOut = shell(
+                "'\(docker)' system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | grep -i 'build cache' | head -1"
+            )
+            if let line = bcOut.split(separator: "\n").first {
+                let parts = line.split(separator: "|").map(String.init)
+                if parts.count >= 2 {
+                    let bcSize = parseSize(parts[1])
+                    if bcSize > 0 {
+                        items.append(SubItem(
+                            path: "build-cache",
+                            name: "Build Cache",
+                            size: bcSize,
+                            note: "All buildkit cache layers. Clearing forces rebuild from scratch on next docker build.",
+                            deleteShellCommand: "'\(docker)' builder prune -af 2>/dev/null"
+                        ))
+                    }
+                }
+            }
+
+            items.sort { $0.size > $1.size }
+            DispatchQueue.main.async { completion(items, true) }
+        }
+    }
+
     func scanDirectory(_ path: String, completion: @escaping ([SubItem]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let out = shell("du -sh '\(path)'/* 2>/dev/null | sort -hr")
@@ -427,9 +682,15 @@ class DiskScanner: ObservableObject {
         }
     }
 
-    func deleteSubItems(_ paths: [String]) {
+    func deleteSubItems(_ items: [SubItem]) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            for p in paths { shell("rm -rf '\(p)'") }
+            for item in items {
+                if let cmd = item.deleteShellCommand {
+                    shell(cmd)
+                } else {
+                    shell("rm -rf '\(item.path)'")
+                }
+            }
             _scanAppData()
             _scanDisk()
         }
