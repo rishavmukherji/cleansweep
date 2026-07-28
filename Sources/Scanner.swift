@@ -55,14 +55,31 @@ struct SubItem: Identifiable {
     let path: String
     let name: String
     let size: Int64
+    var isDirectory: Bool = true
     var referencingRepos: [String]? = nil
     var note: String? = nil
     var warning: String? = nil
     var deleteShellCommand: String? = nil
 }
 
+enum FolderKind {
+    case regular
+    case cloudSynced
+}
+
+struct FolderItem: Identifiable {
+    let id = UUID()
+    let name: String        // display label, e.g. "~/Library/CloudStorage"
+    let path: String        // absolute path
+    let size: Int64         // real on-disk bytes (allocated blocks)
+    let isDirectory: Bool   // false for large top-level files (not drillable)
+    let kind: FolderKind
+    let note: String?       // guidance shown inline (esp. for cloud-synced)
+}
+
 enum ScanCategory: String, CaseIterable, Identifiable {
     case overview = "Overview"
+    case largestFolders = "Largest Folders"
     case nodeModules = "node_modules"
     case buildArtifacts = "Build Artifacts"
     case caches = "Caches"
@@ -73,6 +90,7 @@ enum ScanCategory: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
+        case .largestFolders: return "internaldrive"
         case .nodeModules: return "shippingbox"
         case .buildArtifacts: return "hammer"
         case .caches: return "archivebox"
@@ -90,6 +108,9 @@ class DiskScanner: ObservableObject {
     @Published var caches: [CacheItem] = []
     @Published var appData: [AppDataItem] = []
     @Published var applications: [AppItem] = []
+    @Published var largestFolders: [FolderItem] = []
+    @Published var isLoadingLargestFolders = false
+    private var largestFoldersLoaded = false
     @Published var isScanning = false
     @Published var scanProgress = ""
     @Published var diskTotal: Int64 = 0
@@ -104,6 +125,8 @@ class DiskScanner: ObservableObject {
     var totalReclaimable: Int64 {
         totalNodeModulesSize + totalBuildArtifactsSize + totalCachesSize + totalAppDataSize
     }
+    var cloudSyncedFolders: [FolderItem] { largestFolders.filter { $0.kind == .cloudSynced } }
+    var totalCloudSyncedSize: Int64 { cloudSyncedFolders.reduce(0) { $0 + $1.size } }
 
     private let home = FileManager.default.homeDirectoryForCurrentUser.path
 
@@ -153,7 +176,10 @@ class DiskScanner: ObservableObject {
 
     func scanAll() {
         guard !isScanning else { return }
-        DispatchQueue.main.async { self.isScanning = true }
+        DispatchQueue.main.async {
+            self.isScanning = true
+            self.largestFoldersLoaded = false   // invalidate; reloads lazily on next visit
+        }
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             setProgress("Checking disk...")
@@ -274,12 +300,34 @@ class DiskScanner: ObservableObject {
         DispatchQueue.main.async { self.caches = items }
     }
 
+    // Claude Desktop can be installed as multiple named profiles (Claude, Claude-Work,
+    // Claude-Personal, ...), each with its own vm_bundles directory of several GB. Discover
+    // them all instead of hardcoding the single default path.
+    private func claudeVMBundleChecks() -> [(String, String, String, String)] {
+        let appSupport = "\(home)/Library/Application Support"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: appSupport) else {
+            return []
+        }
+        var result: [(String, String, String, String)] = []
+        for entry in entries.sorted() where entry == "Claude" || entry.hasPrefix("Claude-") {
+            let vmPath = "\(appSupport)/\(entry)/vm_bundles"
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: vmPath, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
+            let profile = entry == "Claude" ? "" : String(entry.dropFirst("Claude-".count))
+            let name = profile.isEmpty ? "Claude VM Bundles" : "Claude VM Bundles — \(profile)"
+            let desc = profile.isEmpty
+                ? "Sandboxed environments for code execution. Re-downloads on demand."
+                : "Sandboxed environments for the \(profile) Claude profile. Re-downloads on demand."
+            result.append((name, desc, vmPath, "cpu"))
+        }
+        return result
+    }
+
     private func _scanAppData() {
-        let checks: [(String, String, String, String)] = [
+        let checks: [(String, String, String, String)] = claudeVMBundleChecks() + [
             // App caches
-            ("Claude VM Bundles",
-             "Sandboxed environments for code execution. Re-downloads on demand.",
-             "\(home)/Library/Application Support/Claude/vm_bundles", "cpu"),
             ("WhatsApp Media",
              "Cached media files. Originals stay on your phone.",
              "\(home)/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/Message/Media", "message"),
@@ -357,6 +405,80 @@ class DiskScanner: ObservableObject {
             items.append(AppItem(name: name, path: path, size: size))
         }
         DispatchQueue.main.async { self.applications = items }
+    }
+
+    // Surfaces the true biggest consumers of disk space regardless of the curated
+    // reclaimable allowlist — so cloud drives, media, and personal data can't hide.
+    // `du` counts allocated blocks, so cloud placeholders (online-only files) count as
+    // ~0; only data actually materialized on disk is reported.
+    //
+    // Lazy: this walks the whole home directory (including huge cloud-sync trees), which
+    // is far heavier than the curated scans, so it runs only when the user opens the
+    // Largest Folders tab — never as part of scanAll().
+    func loadLargestFolders(force: Bool = false) {
+        guard !isLoadingLargestFolders else { return }
+        guard force || !largestFoldersLoaded else { return }
+        DispatchQueue.main.async { self.isLoadingLargestFolders = true }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let items = _computeLargestFolders()
+            DispatchQueue.main.async {
+                self.largestFolders = items
+                self.isLoadingLargestFolders = false
+                self.largestFoldersLoaded = true
+            }
+        }
+    }
+
+    private func _computeLargestFolders() -> [FolderItem] {
+        let library = "\(home)/Library"
+        let cloudStorageRoot = "\(home)/Library/CloudStorage"
+        let mobileDocsRoot = "\(home)/Library/Mobile Documents"
+        // Top-level home entries (visible + hidden) with ~/Library expanded one level,
+        // since Library is a catch-all where the largest data usually hides.
+        let out = shell(
+            "setopt null_glob 2>/dev/null; "
+            + "{ du -sh '\(home)'/* '\(home)'/.[!.]* 2>/dev/null | grep -v '/Library$'; "
+            + "du -sh '\(library)'/* 2>/dev/null; } | sort -rh"
+        )
+
+        let fm = FileManager.default
+        var items: [FolderItem] = []
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let size = parseSize(String(parts[0]))
+            let path = String(parts[1])
+            guard size > 104_857_600 else { continue }   // hide < 100 MB
+
+            let display = path.hasPrefix(home)
+                ? "~" + path.dropFirst(home.count)
+                : path
+
+            var isDir: ObjCBool = false
+            let exists = fm.fileExists(atPath: path, isDirectory: &isDir)
+            let isDirectory = exists && isDir.boolValue
+
+            var kind: FolderKind = .regular
+            var note: String? = nil
+            if path.hasPrefix(cloudStorageRoot) {
+                kind = .cloudSynced
+                note = "Cloud-synced files kept on this Mac. Deleting here also removes them "
+                    + "from the cloud. To reclaim safely: in Finder, right-click a folder → "
+                    + "\"Make available online only\" (or turn off \"Available offline\")."
+            } else if path.hasPrefix(mobileDocsRoot) {
+                kind = .cloudSynced
+                note = "iCloud Drive files kept on this Mac. To reclaim: System Settings → "
+                    + "[your name] → iCloud → turn on \"Optimize Mac Storage,\" or remove "
+                    + "downloads in Finder."
+            }
+
+            items.append(FolderItem(
+                name: display, path: path, size: size,
+                isDirectory: isDirectory, kind: kind, note: note
+            ))
+            if items.count >= 40 { break }
+        }
+        return items
     }
 
     // MARK: - Clean actions
@@ -668,6 +790,7 @@ class DiskScanner: ObservableObject {
     func scanDirectory(_ path: String, completion: @escaping ([SubItem]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let out = shell("du -sh '\(path)'/* 2>/dev/null | sort -hr")
+            let fm = FileManager.default
             var items: [SubItem] = []
             for line in out.split(separator: "\n") {
                 let parts = line.split(separator: "\t", maxSplits: 1)
@@ -676,7 +799,9 @@ class DiskScanner: ObservableObject {
                 let p = String(parts[1])
                 let name = (p as NSString).lastPathComponent
                 guard size > 0 else { continue }
-                items.append(SubItem(path: p, name: name, size: size))
+                var isDir: ObjCBool = false
+                let isDirectory = fm.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
+                items.append(SubItem(path: p, name: name, size: size, isDirectory: isDirectory))
             }
             DispatchQueue.main.async { completion(items) }
         }
