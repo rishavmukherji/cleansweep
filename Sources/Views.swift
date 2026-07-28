@@ -7,6 +7,13 @@ private func showInFinder(_ path: String) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
 }
 
+// Shared size emphasis: red > 5 GB, orange > 1 GB, otherwise neutral.
+private func sizeTint(_ bytes: Int64) -> Color {
+    if bytes > 5_368_709_120 { return .red }
+    if bytes > 1_073_741_824 { return .orange }
+    return .primary
+}
+
 // MARK: - Content View
 
 struct ContentView: View {
@@ -35,6 +42,7 @@ struct ContentView: View {
             Group {
                 switch selected {
                 case .overview: OverviewView(selected: $selected)
+                case .largestFolders: LargestFoldersView()
                 case .nodeModules: NodeModulesView()
                 case .buildArtifacts: BuildArtifactsView()
                 case .caches: CachesView()
@@ -110,6 +118,33 @@ struct OverviewView: View {
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.08)))
+
+                Button {
+                    selected = .largestFolders
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "internaldrive")
+                            .font(.title3)
+                            .foregroundColor(.accentColor)
+                            .frame(width: 32)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Not seeing your big files here?").fontWeight(.medium)
+                            Text("The list above is only reclaimable dev cruft. Most disk use is often personal data — cloud drives, media, backups — that lives elsewhere. Explore where your space actually is.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Text("Largest Folders")
+                            .font(.callout)
+                            .foregroundStyle(Color.accentColor)
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.25)))
+                }
+                .buttonStyle(.plain)
 
                 HStack(spacing: 16) {
                     Button {
@@ -199,7 +234,7 @@ struct CategoryRow: View {
                 Spacer()
                 Text(DiskScanner.fmt(size))
                     .font(.title3)
-                    .foregroundStyle(size > 5_368_709_120 ? .red : size > 1_073_741_824 ? .orange : .primary)
+                    .foregroundStyle(sizeTint(size))
                 Image(systemName: "chevron.right").foregroundStyle(.secondary)
             }
             .padding(12)
@@ -651,7 +686,7 @@ struct AppDataDetailView: View {
         switch item.name {
         case "pnpm Store":
             scanner.scanPnpmStore(item.path, completion: handler)
-        case "Claude VM Bundles":
+        case let n where n.hasPrefix("Claude VM Bundles"):
             scanner.scanClaudeVMBundles(item.path, completion: handler)
         case "OrbStack / Docker":
             scanner.scanOrbStack { items, running in
@@ -666,7 +701,7 @@ struct AppDataDetailView: View {
 
     @ViewBuilder
     private var infoBanner: some View {
-        if item.name == "Claude VM Bundles" {
+        if item.name.hasPrefix("Claude VM Bundles") {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "info.circle.fill")
                     .foregroundStyle(.blue)
@@ -897,6 +932,271 @@ struct AppsView: View {
                 }
             }
             .listStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Largest Folders
+
+struct FolderCrumb: Identifiable {
+    let id = UUID()
+    let name: String
+    let path: String
+}
+
+struct LargestFoldersView: View {
+    @EnvironmentObject var scanner: DiskScanner
+    @State private var drill: [FolderCrumb] = []
+    // Per-path cache so back-navigation (and re-drilling) is instant instead of
+    // re-running an expensive `du` over the same subtree.
+    @State private var cache: [String: [SubItem]] = [:]
+
+    var body: some View {
+        Group {
+            if let crumb = drill.last {
+                FolderBrowserView(
+                    crumb: crumb,
+                    loadChildren: loadChildren,
+                    onOpen: { drill.append($0) },
+                    onBack: { if !drill.isEmpty { drill.removeLast() } },
+                    onRoot: { drill.removeAll() }
+                )
+                .id(crumb.id)
+            } else {
+                topList
+            }
+        }
+        .onAppear { scanner.loadLargestFolders() }
+    }
+
+    private func loadChildren(_ path: String, _ done: @escaping ([SubItem]) -> Void) {
+        if let cached = cache[path] { done(cached); return }
+        scanner.scanDirectory(path) { items in
+            cache[path] = items
+            done(items)
+        }
+    }
+
+    private var topList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Largest Folders").font(.title2.bold())
+                    Text("Where your disk space actually is — the true top consumers, including data no cleanup category covers.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button {
+                    cache.removeAll()
+                    scanner.loadLargestFolders(force: true)
+                } label: {
+                    Label("Rescan", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .disabled(scanner.isLoadingLargestFolders)
+            }
+            .padding()
+
+            if scanner.totalCloudSyncedSize > 0 {
+                cloudBanner
+            }
+
+            Divider()
+
+            if scanner.isLoadingLargestFolders {
+                Spacer()
+                ProgressView("Measuring your home folder…\nThis walks large cloud-sync trees and can take a moment.")
+                    .multilineTextAlignment(.center)
+                Spacer()
+            } else if scanner.largestFolders.isEmpty {
+                Spacer()
+                Text("No folders over 100 MB found").foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(scanner.largestFolders) { item in
+                            FolderRow(item: item) {
+                                drill.append(FolderCrumb(name: item.name, path: item.path))
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+    }
+
+    private var cloudBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "icloud.and.arrow.down")
+                .foregroundStyle(.blue)
+                .font(.callout)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(DiskScanner.fmt(scanner.totalCloudSyncedSize)) of your disk is cloud-synced files stored locally.")
+                    .font(.callout).fontWeight(.medium)
+                Text("This is not reclaimable cache — it's your Google Drive / iCloud data. Deleting it removes it from the cloud too. To free the space safely, make those folders online-only (guidance is on each row below).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(.horizontal).padding(.vertical, 10)
+        .background(Color.blue.opacity(0.08))
+    }
+}
+
+struct FolderRow: View {
+    let item: FolderItem
+    let onOpen: () -> Void
+
+    private var iconName: String {
+        if item.kind == .cloudSynced { return "icloud" }
+        return item.isDirectory ? "folder" : "doc"
+    }
+
+    var body: some View {
+        // Directories drill in; a large top-level file just reveals in Finder.
+        Button(action: { item.isDirectory ? onOpen() : showInFinder(item.path) }) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 12) {
+                    Image(systemName: iconName)
+                        .font(.title3)
+                        .foregroundColor(.accentColor)
+                        .frame(width: 28)
+                    Text(item.name)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if item.kind == .cloudSynced {
+                        Text("cloud-synced")
+                            .font(.caption2)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                            .foregroundStyle(.blue)
+                    }
+                    Text(DiskScanner.fmt(item.size))
+                        .font(.title3)
+                        .monospacedDigit()
+                        .foregroundStyle(sizeTint(item.size))
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(item.isDirectory ? Color.secondary : Color.clear)
+                }
+                if let note = item.note {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 40)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2)))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Show in Finder") { showInFinder(item.path) }
+        }
+    }
+}
+
+// Read-only recursive browser: shows what's inside a large folder so you can see exactly
+// where the space is, without offering to delete arbitrary personal data.
+struct FolderBrowserView: View {
+    let crumb: FolderCrumb
+    let loadChildren: (String, @escaping ([SubItem]) -> Void) -> Void
+    let onOpen: (FolderCrumb) -> Void
+    let onBack: () -> Void
+    let onRoot: () -> Void
+
+    @State private var contents: [SubItem] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if isLoading {
+                Spacer(); ProgressView("Scanning \(crumb.name)..."); Spacer()
+            } else if contents.isEmpty {
+                Spacer()
+                Text("Nothing to show inside this folder.").foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                List {
+                    ForEach(contents) { sub in
+                        row(sub)
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Button(action: onBack) {
+                HStack(spacing: 4) { Image(systemName: "chevron.left"); Text("Back") }
+            }
+            .buttonStyle(.plain)
+            Button(action: onRoot) { Image(systemName: "list.bullet") }
+                .buttonStyle(.plain)
+                .help("Back to largest folders")
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(crumb.name).font(.title3.bold()).lineLimit(1).truncationMode(.middle)
+                Text(crumb.path)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            Button { showInFinder(crumb.path) } label: { Image(systemName: "folder") }
+                .buttonStyle(.plain)
+                .help("Show in Finder")
+        }
+        .padding()
+    }
+
+    private func row(_ sub: SubItem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: sub.isDirectory ? "folder" : "doc")
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            Text(sub.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(DiskScanner.fmt(sub.size))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .trailing)
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(sub.isDirectory ? Color.secondary : Color.clear)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if sub.isDirectory { onOpen(FolderCrumb(name: sub.name, path: sub.path)) }
+        }
+        .contextMenu {
+            Button("Show in Finder") { showInFinder(sub.path) }
+        }
+    }
+
+    private func load() {
+        isLoading = true
+        loadChildren(crumb.path) { items in
+            contents = items
+            isLoading = false
         }
     }
 }
