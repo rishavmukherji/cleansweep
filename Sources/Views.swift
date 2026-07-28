@@ -1015,16 +1015,19 @@ struct LargestFoldersView: View {
                 Text("No folders over 100 MB found").foregroundStyle(.secondary)
                 Spacer()
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(scanner.largestFolders) { item in
-                            FolderRow(item: item) {
-                                drill.append(FolderCrumb(name: item.name, path: item.path))
-                            }
+                // List (not ScrollView+LazyVStack) so it reliably scrolls within the
+                // NavigationSplitView detail and the header above stays fixed.
+                List {
+                    ForEach(scanner.largestFolders) { item in
+                        FolderRow(item: item) {
+                            drill.append(FolderCrumb(name: item.name, path: item.path))
                         }
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                        .listRowBackground(Color.clear)
                     }
-                    .padding()
                 }
+                .listStyle(.plain)
             }
         }
     }
